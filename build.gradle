@@ -1,0 +1,160 @@
+plugins {
+    id 'java-library'
+    id 'checkstyle'
+    id 'idea'
+    id 'com.google.cloud.tools.jib' version '3.5.4'
+}
+
+group = 'io.trino.plugin'
+version = '475'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        // Compile with the provisioned IDE JDK while emitting the Java 23 bytecode required by Trino 475.
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+    withSourcesJar()
+}
+
+idea {
+    project {
+        jdkName = '25'
+        languageLevel = '23'
+    }
+    module {
+        downloadJavadoc = false
+        downloadSources = false
+    }
+}
+
+checkstyle {
+    toolVersion = '14.3.0'
+    configFile = rootProject.file('config/checkstyle/checkstyle.xml')
+    maxWarnings = 0
+}
+
+tasks.withType(Checkstyle).configureEach {
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+dependencies {
+    implementation platform('io.trino:trino-root:475')
+
+    implementation 'com.google.guava:guava'
+    implementation('com.google.inject:guice') {
+        artifact {
+            classifier = 'classes'
+        }
+    }
+    implementation 'com.mysql:mysql-connector-j'
+    implementation 'io.airlift:configuration'
+    implementation 'io.trino:trino-base-jdbc'
+    implementation 'io.trino:trino-plugin-toolkit'
+    implementation 'jakarta.validation:jakarta.validation-api'
+
+    compileOnly 'com.fasterxml.jackson.core:jackson-annotations'
+    compileOnly 'io.airlift:slice'
+    compileOnly 'io.opentelemetry:opentelemetry-api'
+    compileOnly 'io.opentelemetry:opentelemetry-api-incubator'
+    compileOnly 'io.opentelemetry:opentelemetry-context'
+    compileOnly 'io.trino:trino-spi'
+
+    testImplementation 'io.airlift:configuration-testing'
+    testImplementation 'io.trino:trino-spi'
+    testImplementation 'io.trino:trino-testing'
+    testImplementation 'org.assertj:assertj-core'
+    testImplementation 'org.junit.jupiter:junit-jupiter-api'
+    testImplementation platform('org.testcontainers:testcontainers-bom:2.0.5')
+    testImplementation 'org.testcontainers:testcontainers'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+def pluginRuntimeClasspath = configurations.create('pluginRuntimeClasspath') {
+    canBeConsumed = false
+    canBeResolved = true
+    extendsFrom configurations.implementation, configurations.runtimeOnly
+}
+
+// Jib packages the Java runtime classpath under /app. Trino loads this project as a plugin instead, so keep Jib's
+// application classpath empty and stage the complete connector dependency set under /usr/lib/trino/plugin/starrocks.
+configurations.runtimeClasspath.setExtendsFrom([])
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 23
+    options.compilerArgs.add('-parameters')
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    jvmArgs '--add-modules=jdk.incubator.vector'
+}
+
+def pluginName = 'starrocks'
+def pluginDirectory = layout.buildDirectory.dir("trino-plugin/${pluginName}")
+def stagedImageDirectory = layout.buildDirectory.dir('jib-extra')
+
+tasks.register('assemblePlugin', Sync) {
+    group = 'build'
+    description = "Assembles the connector and runtime dependencies in Trino's plugin directory layout."
+    dependsOn tasks.named('jar')
+    into pluginDirectory
+    from tasks.named('jar')
+    from pluginRuntimeClasspath
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+tasks.named('assemble') {
+    dependsOn tasks.named('assemblePlugin')
+}
+
+tasks.register('stageTrinoPluginImage', Sync) {
+    group = 'container'
+    description = 'Stages the connector in the official Trino plugin directory layout for Jib.'
+    dependsOn tasks.named('assemblePlugin')
+    from pluginDirectory
+    into stagedImageDirectory.map { it.dir("usr/lib/trino/plugin/${pluginName}") }
+}
+
+def imageRepository = providers.gradleProperty('dockerRepository').getOrElse('')
+def defaultImageName = imageRepository ? "${imageRepository}/trino-starrocks" : 'trino-starrocks'
+def imageTag = providers.gradleProperty('dockerImageTag').getOrElse(version.toString())
+
+jib {
+    containerizingMode = 'packaged'
+    from {
+        image = providers.gradleProperty('dockerBaseImage').getOrElse("trinodb/trino:${version}")
+    }
+    to {
+        image = providers.gradleProperty('containerImage').getOrElse("${defaultImageName}:${imageTag}")
+    }
+    container {
+        entrypoint = ['/usr/lib/trino/bin/run-trino']
+        user = 'trino:trino'
+        workingDirectory = '/'
+        creationTime = 'USE_CURRENT_TIMESTAMP'
+    }
+    extraDirectories {
+        paths {
+            path {
+                setFrom(stagedImageDirectory)
+                into = '/'
+            }
+        }
+    }
+}
+
+['jib', 'jibDockerBuild', 'jibBuildTar'].each { taskName ->
+    tasks.named(taskName) {
+        dependsOn tasks.named('stageTrinoPluginImage')
+    }
+}
