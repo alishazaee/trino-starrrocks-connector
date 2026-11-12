@@ -11,14 +11,29 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package io.trino.plugin.starrocks;
 
-import io.trino.plugin.jdbc.JdbcPlugin;
+import static io.trino.spi.ErrorType.EXTERNAL;
 
-/** Exposes the StarRocks connector factory to Trino. */
-public final class StarRocksPlugin extends JdbcPlugin {
-    public StarRocksPlugin() {
-        super("starrocks", StarRocksClientModule::new);
+import io.trino.spi.ErrorCode;
+import io.trino.spi.ErrorCodeSupplier;
+import io.trino.spi.ErrorType;
+
+public enum StarRocksErrorCode implements ErrorCodeSupplier
+{
+    STAR_ROCKS_WRITE_ERROR(0, EXTERNAL)
+    /**/;
+
+    private final ErrorCode errorCode;
+
+    StarRocksErrorCode(int code, ErrorType type)
+    {
+        errorCode = new ErrorCode(code + 0x0102_0000, name(), type);
+    }
+
+    @Override
+    public ErrorCode toErrorCode()
+    {
+        return errorCode;
     }
 }
