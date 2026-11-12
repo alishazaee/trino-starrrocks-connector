@@ -17,14 +17,11 @@ import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.emptyToNull;
-import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.starrocks.data.load.stream.StreamLoadConstants.TABLE_MODEL_PRIMARY_KEYS;
 import static io.airlift.json.JsonCodec.jsonCodec;
-import static io.airlift.slice.Slices.utf8Slice;
-import static io.trino.plugin.base.util.JsonTypeUtil.jsonParse;
 import static io.trino.plugin.jdbc.DecimalConfig.DecimalMapping.ALLOW_OVERFLOW;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalDefaultScale;
 import static io.trino.plugin.jdbc.DecimalSessionSessionProperties.getDecimalRounding;
@@ -46,6 +43,7 @@ import static io.trino.plugin.jdbc.StandardColumnMappings.doubleColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.doubleWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerColumnMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.integerWriteFunction;
+import static io.trino.plugin.jdbc.StandardColumnMappings.jsonWriteMapping;
 import static io.trino.plugin.jdbc.StandardColumnMappings.longDecimalWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.realWriteFunction;
 import static io.trino.plugin.jdbc.StandardColumnMappings.shortDecimalWriteFunction;
@@ -150,6 +148,7 @@ import io.trino.plugin.jdbc.PreparedQuery;
 import io.trino.plugin.jdbc.QueryBuilder;
 import io.trino.plugin.jdbc.JdbcQueryRelationHandle;
 import io.trino.plugin.jdbc.RemoteTableName;
+import io.trino.plugin.jdbc.StandardColumnMappings;
 import io.trino.plugin.jdbc.UnsupportedTypeHandling;
 import io.trino.plugin.jdbc.WriteMapping;
 import io.trino.plugin.jdbc.aggregation.ImplementAvgDecimal;
@@ -165,6 +164,7 @@ import io.trino.plugin.jdbc.aggregation.ImplementVariancePop;
 import io.trino.plugin.jdbc.aggregation.ImplementVarianceSamp;
 import io.trino.plugin.jdbc.expression.JdbcConnectorExpressionRewriterBuilder;
 import io.trino.plugin.jdbc.expression.ParameterizedExpression;
+import io.trino.plugin.jdbc.expression.RewriteCoalesce;
 import io.trino.plugin.jdbc.expression.RewriteIn;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.spi.TrinoException;
@@ -179,7 +179,10 @@ import io.trino.spi.connector.JoinStatistics;
 import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.TableNotFoundException;
+import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.FunctionName;
+import io.trino.spi.expression.StandardFunctions;
 import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.Estimate;
 import io.trino.spi.statistics.TableStatistics;
@@ -263,20 +266,19 @@ public class StarRocksClient
         this.connectorExpressionRewriter = JdbcConnectorExpressionRewriterBuilder.newBuilder()
                 .addStandardRules(this::quoted)
                 .add(new RewriteIn())
-                .withTypeClass("supported_type", ImmutableSet.of("tinyint", "smallint", "integer", "bigint", "decimal", "double", "char", "varchar"))
-                .withTypeClass("numeric_type", ImmutableSet.of("tinyint", "smallint", "integer", "bigint", "decimal", "double"))
+                .add(new RewriteCoalesce())
+                .withTypeClass("supported_type", ImmutableSet.of("tinyint", "smallint", "integer", "bigint", "decimal", "double", "char", "varchar", "date"))
+                .withTypeClass("small_integer", ImmutableSet.of("tinyint", "smallint", "integer"))
+                .map("$cast(value: small_integer): bigint").to("CAST(value AS BIGINT)")
+                .map("length(value: varchar): bigint").to("char_length(value)")
                 .map("$equal(left: supported_type, right: supported_type)").to("left = right")
                 .map("$not_equal(left: supported_type, right: supported_type)").to("left <> right")
                 .map("$less_than(left: supported_type, right: supported_type)").to("left < right")
                 .map("$less_than_or_equal(left: supported_type, right: supported_type)").to("left <= right")
                 .map("$greater_than(left: supported_type, right: supported_type)").to("left > right")
                 .map("$greater_than_or_equal(left: supported_type, right: supported_type)").to("left >= right")
-                .map("$add(left: numeric_type, right: numeric_type)").to("left + right")
-                .map("$subtract(left: numeric_type, right: numeric_type)").to("left - right")
-                .map("$multiply(left: numeric_type, right: numeric_type)").to("multiply(left, right)")
-                .map("$divide(left: numeric_type, right: numeric_type)").to("divide(left, right)")
-                .map("$modulus(left: numeric_type, right: numeric_type)").to("mod(left, right)")
-                .map("$negate(value: numeric_type)").to("negative(value)")
+                // Arithmetic rules are intentionally omitted. Division/modulo differ in rounding and
+                // zero-divisor behavior, while other integer operations can lose Trino overflow errors.
                 .map("$like(value: varchar, pattern: varchar): boolean").to("value LIKE pattern")
                 .map("$not(value: boolean)").to("NOT value")
                 .map("$nullif(first, second)").to("nullif(first, second)")
@@ -288,8 +290,10 @@ public class StarRocksClient
                 ImmutableSet.<AggregateFunctionRule<JdbcExpression, ParameterizedExpression>>builder()
                         .add(new ImplementCountAll(bigintTypeHandle))
                         .add(new ImplementCount(bigintTypeHandle))
-                        .add(new ImplementCountDistinct(bigintTypeHandle, false))
-                        .add(new ImplementMinMax(false))
+                        // StarRocks string values are case-sensitive, unlike the MySQL
+                        // default collation. This also permits mixed DISTINCT aggregates.
+                        .add(new ImplementCountDistinct(bigintTypeHandle, true))
+                        .add(new ImplementMinMax(true))
                         .add(new ImplementSum(StarRocksClient::toTypeHandle))
                         .add(new ImplementAvgFloatingPoint())
                         .add(new ImplementAvgDecimal())
@@ -996,11 +1000,7 @@ public class StarRocksClient
 
     private ColumnMapping jsonColumnMapping()
     {
-        return ColumnMapping.sliceMapping(
-                jsonType,
-                (resultSet, columnIndex) -> jsonParse(utf8Slice(resultSet.getString(columnIndex))),
-                varcharWriteFunction(),
-                DISABLE_PUSHDOWN);
+        return StandardColumnMappings.jsonColumnMapping(jsonType, varcharWriteFunction());
     }
 
     private static Optional<JdbcTypeHandle> toTypeHandle(DecimalType decimalType)
@@ -1242,7 +1242,7 @@ public class StarRocksClient
         }
 
         if (type.equals(jsonType)) {
-            return WriteMapping.sliceMapping("json", varcharWriteFunction());
+            return jsonWriteMapping("json", varcharWriteFunction());
         }
 
         throw new TrinoException(NOT_SUPPORTED, "Unsupported column type: " + type.getDisplayName());
@@ -1309,6 +1309,40 @@ public class StarRocksClient
     }
 
     @Override
+    public Optional<JdbcExpression> convertProjection(ConnectorSession session, JdbcTableHandle handle, ConnectorExpression expression, Map<String, ColumnHandle> assignments)
+    {
+        // AVG/SUM over INT insert a widening cast before aggregation. Without
+        // projection pushdown that cast keeps the entire aggregation in Trino.
+        // Only accept lossless integer widening here; arbitrary arithmetic has
+        // different overflow semantics in StarRocks.
+        if (!(expression instanceof Call call)) {
+            return Optional.empty();
+        }
+        boolean wideningCast = call.getFunctionName().equals(StandardFunctions.CAST_FUNCTION_NAME)
+                && expression.getType().equals(BIGINT)
+                && call.getArguments().size() == 1
+                && ImmutableSet.of(TINYINT, SMALLINT, INTEGER).contains(call.getArguments().getFirst().getType());
+        boolean nullHandling = call.getFunctionName().equals(StandardFunctions.COALESCE_FUNCTION_NAME)
+                || call.getFunctionName().equals(StandardFunctions.NULLIF_FUNCTION_NAME);
+        boolean characterLength = call.getFunctionName().equals(new FunctionName("length"));
+        if (!wideningCast && !nullHandling && !characterLength) {
+            return Optional.empty();
+        }
+        JdbcTypeHandle resultType;
+        if (expression.getType().equals(BIGINT)) {
+            resultType = new JdbcTypeHandle(Types.BIGINT, Optional.of("bigint"), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+        }
+        else if (expression.getType() instanceof VarcharType) {
+            resultType = new JdbcTypeHandle(Types.VARCHAR, Optional.of("varchar"), Optional.of(Integer.MAX_VALUE), Optional.empty(), Optional.empty(), Optional.empty());
+        }
+        else {
+            return Optional.empty();
+        }
+        return connectorExpressionRewriter.rewrite(session, expression, assignments)
+                .map(rewritten -> new JdbcExpression(rewritten.expression(), rewritten.parameters(), resultType));
+    }
+
+    @Override
     public Optional<PreparedQuery> implementJoin(
             ConnectorSession session,
             JoinType joinType,
@@ -1319,10 +1353,6 @@ public class StarRocksClient
             List<ParameterizedExpression> joinConditions,
             JoinStatistics statistics)
     {
-        if (joinType == JoinType.FULL_OUTER) {
-            // Not supported in MySQL
-            return Optional.empty();
-        }
         return implementJoinCostAware(
                 session,
                 joinType,
@@ -1344,9 +1374,11 @@ public class StarRocksClient
         try {
             return readTableStatistics(session, handle);
         }
-        catch (SQLException | RuntimeException e) {
-            throwIfInstanceOf(e, TrinoException.class);
-            throw new TrinoException(JDBC_ERROR, "Failed fetching statistics for table: " + handle, e);
+        catch (SQLException | UnableToExecuteStatementException e) {
+            // StarRocks creates the _statistics_ database lazily. Statistics must remain optional so
+            // ordinary queries work before the first ANALYZE operation or when statistics are unavailable.
+            log.debug(e, "Statistics are unavailable for table %s", handle);
+            return TableStatistics.empty();
         }
     }
 
@@ -1371,7 +1403,16 @@ public class StarRocksClient
             TableStatistics.Builder tableStatistics = TableStatistics.builder();
             tableStatistics.setRowCount(Estimate.of(rowCount));
 
-            Map<String, RawColumnStats> rawColumnStats = statisticsDao.getRawColumnStats(table);
+            Map<String, RawColumnStats> rawColumnStats;
+            try {
+                rawColumnStats = statisticsDao.getRawColumnStats(table);
+            }
+            catch (UnableToExecuteStatementException e) {
+                // Table-level metadata can be available even when StarRocks has not created or populated
+                // its optional column-statistics tables. Keep the row count instead of dropping all stats.
+                log.debug(e, "Column statistics are unavailable for table %s", table);
+                return tableStatistics.build();
+            }
 
             if (rawColumnStats.isEmpty()) {
                 log.debug("No raw column statistics read");

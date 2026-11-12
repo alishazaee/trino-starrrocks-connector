@@ -35,8 +35,10 @@ import io.trino.plugin.jdbc.DecimalModule;
 import io.trino.plugin.jdbc.DriverConnectionFactory;
 import io.trino.plugin.jdbc.ForBaseJdbc;
 import io.trino.plugin.jdbc.JdbcClient;
+import io.trino.plugin.jdbc.JdbcJoinPushdownConfig;
 import io.trino.plugin.jdbc.JdbcJoinPushdownSupportModule;
 import io.trino.plugin.jdbc.JdbcStatisticsConfig;
+import io.trino.plugin.jdbc.JoinPushdownStrategy;
 import io.trino.plugin.jdbc.TablePropertiesProvider;
 import io.trino.plugin.jdbc.credential.CredentialConfig;
 import io.trino.plugin.jdbc.credential.CredentialProvider;
@@ -63,6 +65,11 @@ public class StarRocksClientModule
         bindSessionPropertiesProvider(binder, StarRocksWriteSessionProperties.class);
         install(new DecimalModule());
         install(new JdbcJoinPushdownSupportModule());
+        // Prefer remote execution for every supported same-catalog join, even
+        // when StarRocks statistics are unavailable. Explicit catalog/session
+        // settings can still select AUTOMATIC or disable join pushdown.
+        configBinder(binder).bindConfigDefaults(JdbcJoinPushdownConfig.class,
+                config -> config.setJoinPushdownStrategy(JoinPushdownStrategy.EAGER));
         newSetBinder(binder, ConnectorTableFunction.class).addBinding().toProvider(Query.class).in(Scopes.SINGLETON);
         newOptionalBinder(binder, ConnectorPageSinkProvider.class).setBinding().to(StarRocksPageSinkProvider.class).in(Scopes.SINGLETON);
     }

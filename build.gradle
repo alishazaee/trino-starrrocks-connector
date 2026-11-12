@@ -14,7 +14,7 @@ repositories {
 
 java {
     toolchain {
-        // Compile with the provisioned IDE JDK while emitting the Java 23 bytecode required by Trino 475.
+        // Trino 484 requires Java 25.
         languageVersion = JavaLanguageVersion.of(25)
     }
     withSourcesJar()
