@@ -60,6 +60,18 @@ public class StarRocksClientModule
         newSetBinder(binder, TablePropertiesProvider.class).addBinding().to(StarRocksTableProperties.class).in(Scopes.SINGLETON);
         configBinder(binder).bindConfig(StarRocksJdbcConfig.class);
         configBinder(binder).bindConfig(StarRocksConfig.class);
+        configBinder(binder).bindConfig(StarRocksFlightConfig.class);
+        if (buildConfigObject(StarRocksFlightConfig.class).isEnabled()) {
+            binder.bind(io.trino.plugin.jdbc.JdbcPageSourceProvider.class).in(Scopes.SINGLETON);
+            binder.bind(StarRocksFlightClient.class).in(Scopes.SINGLETON);
+            newSetBinder(binder, io.trino.plugin.jdbc.JdbcQueryEventListener.class)
+                    .addBinding().to(StarRocksFlightClient.class);
+            newOptionalBinder(binder, com.google.inject.Key.get(io.trino.spi.connector.ConnectorSplitManager.class,
+                    io.trino.plugin.jdbc.ForJdbcDynamicFiltering.class))
+                    .setBinding().to(StarRocksFlightSplitManager.class).in(Scopes.SINGLETON);
+            newOptionalBinder(binder, io.trino.spi.connector.ConnectorPageSourceProvider.class)
+                    .setBinding().to(StarRocksFlightPageSourceProvider.class).in(Scopes.SINGLETON);
+        }
         configBinder(binder).bindConfig(StarRocksWriteConfig.class);
         configBinder(binder).bindConfig(JdbcStatisticsConfig.class);
         bindSessionPropertiesProvider(binder, StarRocksWriteSessionProperties.class);

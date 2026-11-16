@@ -78,6 +78,8 @@ dependencies {
     implementation 'io.airlift:log'
     implementation 'io.trino:trino-base-jdbc'
     implementation 'io.trino:trino-plugin-toolkit'
+    implementation 'org.apache.arrow:flight-sql:19.0.0'
+    implementation 'org.apache.arrow:arrow-memory-netty:19.0.0'
     implementation 'jakarta.validation:jakarta.validation-api'
     implementation 'org.apache.httpcomponents:httpclient:4.5.13'
     implementation 'org.apache.httpcomponents:httpcore:4.4.15'
@@ -120,7 +122,9 @@ tasks.withType(JavaCompile).configureEach {
 
 tasks.named('test') {
     useJUnitPlatform()
-    jvmArgs '--add-modules=jdk.incubator.vector'
+    // DistributedQueryRunner integration tests start a coordinator and multiple workers in this JVM.
+    maxHeapSize = '2g'
+    jvmArgs '--add-modules=jdk.incubator.vector', '--add-opens=java.base/java.nio=ALL-UNNAMED', '--sun-misc-unsafe-memory-access=allow'
 }
 
 def pluginName = 'starrocks'
@@ -162,7 +166,7 @@ jib {
         image = providers.gradleProperty('containerImage').getOrElse("${defaultImageName}:${imageTag}")
     }
     container {
-        entrypoint = ['/usr/lib/trino/bin/run-trino']
+        entrypoint = ['/usr/lib/trino/bin/launcher', '--etc-dir', '/etc/trino', 'run']
         user = 'trino:trino'
         workingDirectory = '/'
         creationTime = 'USE_CURRENT_TIMESTAMP'
