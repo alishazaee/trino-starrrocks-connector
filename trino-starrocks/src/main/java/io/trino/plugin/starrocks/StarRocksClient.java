@@ -167,6 +167,7 @@ import io.trino.plugin.jdbc.expression.ParameterizedExpression;
 import io.trino.plugin.jdbc.expression.RewriteCoalesce;
 import io.trino.plugin.jdbc.expression.RewriteIn;
 import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
+import io.trino.plugin.starrocks.aggregation.ImplementCountIf;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -290,6 +291,7 @@ public class StarRocksClient
                 ImmutableSet.<AggregateFunctionRule<JdbcExpression, ParameterizedExpression>>builder()
                         .add(new ImplementCountAll(bigintTypeHandle))
                         .add(new ImplementCount(bigintTypeHandle))
+                        .add(new ImplementCountIf(bigintTypeHandle))
                         // StarRocks string values are case-sensitive, unlike the MySQL
                         // default collation. This also permits mixed DISTINCT aggregates.
                         .add(new ImplementCountDistinct(bigintTypeHandle, true))

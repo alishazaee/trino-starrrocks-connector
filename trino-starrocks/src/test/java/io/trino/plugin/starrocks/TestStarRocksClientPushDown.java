@@ -90,6 +90,26 @@ public class TestStarRocksClientPushDown
     }
 
     @Test
+    void testCountIfPushDown()
+            throws SQLException
+    {
+        createSchema();
+        try (Connection connection = DriverManager.getConnection(jdbcUrl, ROOT_USER, ROOT_PASSWORD);
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + SCHEMA + ".boolean_metrics (flag BOOLEAN) DUPLICATE KEY(flag) DISTRIBUTED BY HASH(flag) BUCKETS 1 PROPERTIES (\"replication_num\"=\"1\")");
+            statement.execute("INSERT INTO " + SCHEMA + ".boolean_metrics VALUES (true), (false), (true), (NULL)");
+        }
+        MaterializedResultWithPlan executionPlan = trino.executeWithPlan(trino.getDefaultSession(), """
+                SELECT count_if(flag)
+                FROM %s.%s.boolean_metrics
+                """.formatted(CATALOG, SCHEMA));
+
+        assertPushedDown(executionPlan, AggregationNode.class);
+        assertRowsReadFromStarRocks(executionPlan, 1);
+        assertThat(executionPlan.result().getOnlyValue()).isEqualTo(2L);
+    }
+
+    @Test
     void testProjectionPushDown()
             throws SQLException
     {
