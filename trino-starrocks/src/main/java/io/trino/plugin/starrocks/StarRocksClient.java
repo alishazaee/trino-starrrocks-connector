@@ -1345,6 +1345,33 @@ public class StarRocksClient
     }
 
     @Override
+    public PreparedQuery prepareQuery(ConnectorSession session, JdbcTableHandle table,
+            Optional<List<List<JdbcColumnHandle>>> groupingSets, List<JdbcColumnHandle> columns,
+            Map<String, ParameterizedExpression> columnExpressions)
+    {
+        PreparedQuery query = super.prepareQuery(session, table, groupingSets, columns, columnExpressions);
+        if (table.getRelationHandle() instanceof JdbcQueryRelationHandle relation) {
+            return removeIdentityWrapper(query, relation.getPreparedQuery(),
+                    columns.stream().map(column -> quoted(column.getColumnName())).collect(joining(", ")));
+        }
+        return query;
+    }
+
+    static PreparedQuery removeIdentityWrapper(PreparedQuery query, PreparedQuery source, String projection)
+    {
+        // Match only SQL emitted by the JDBC builder. Comparing the actual source projection
+        // is essential: handle.getColumns() can have been pruned without changing source SQL.
+        // No parsing/replacement inside user SQL, expressions, literals or nested scopes.
+        String prefix = "SELECT " + projection + " FROM ";
+        if (!projection.isEmpty() && source.query().startsWith(prefix)
+                && query.query().equals(prefix + "(" + source.query() + ") o")
+                && query.parameters().equals(source.parameters())) {
+            return source;
+        }
+        return query;
+    }
+
+    @Override
     public Optional<PreparedQuery> implementJoin(
             ConnectorSession session,
             JoinType joinType,

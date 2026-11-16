@@ -340,6 +340,16 @@ public class TestStarRocksClientPushDown
         assertPushedDown(actual, JoinNode.class);
         assertPushedDown(actual, AggregationNode.class);
         assertPushedDown(actual, FilterNode.class);
+        // Regression for the user's three-table Q11: remote joins/aggregation/HAVING,
+        // but Trino 484 leaves TopN local after late aggregation introduces aliases.
+        assertThat(getPlanNodes(actual.queryPlan().orElseThrow().getRoot()))
+                .anyMatch(TopNNode.class::isInstance);
+        List<TableScanNode> scans = getPlanNodes(actual.queryPlan().orElseThrow().getRoot())
+                .filter(TableScanNode.class::isInstance).map(TableScanNode.class::cast).toList();
+        assertThat(scans).hasSize(1);
+        JdbcTableHandle handle = (JdbcTableHandle) scans.getFirst().getTable().connectorHandle();
+        assertThat(handle.getSortOrder()).isEmpty();
+        assertThat(handle.getLimit()).isEmpty();
         assertRemoteEquivalent(sql);
     }
 
